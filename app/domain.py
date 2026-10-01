@@ -7,6 +7,10 @@
   位置漂移。
 - 插入位置完全由锚点标识决定（FIRST 或任一尚存 / 已删 / 本支先前插入的
   步骤），不由下标决定。
+- 字面锚点 "FIRST" 的二义性在重放时按本支状态解析：本支彼时已存在名为
+  FIRST 的步骤（基线 / 墓碑 / 本支先前插入）则指该步骤，否则指虚拟首位。
+  省略 anchor 或显式 null 恒指虚拟首位——首位位置与名为 FIRST 的普通
+  步骤因此始终可区分表达。
 - 双支并发插入同一锚点时，按 (分支名, 操作标识) 稳定裁定：分支名字典序
   较小的一支整体贴近锚点，分支内部则严格保持本支顺序重放结果（后发生的
   同锚点插入更贴近锚点）。
@@ -32,6 +36,15 @@ KINDS = (KIND_INSERT, KIND_DELETE, KIND_REPLACE)
 R_KEPT = "kept"          # 保留：原样生效
 R_TRANSFORMED = "transformed"  # 转换：因并发操作发生位移
 R_MERGED = "merged"      # 合并：幂等重复操作并入先前操作
+
+
+def _anchor_label(anchor: Optional[str]) -> str:
+    """展示用锚点标签：虚拟首位与名为 FIRST 的普通步骤必须可区分。"""
+    if anchor is None:
+        return "FIRST（首位）"
+    if anchor == "FIRST":
+        return "FIRST（同名步骤）"
+    return anchor
 
 
 class OTReject(Exception):
@@ -68,6 +81,7 @@ class Op:
         if self.kind == KIND_INSERT:
             d["new_id"] = self.new_id
             d["anchor"] = self.anchor if self.anchor is not None else "FIRST"
+            d["anchor_kind"] = "head" if self.anchor is None else "step"
         if self.text is not None:
             d["text"] = self.text
         return d
@@ -175,10 +189,10 @@ def parse_request(payload: Any) -> tuple[list[dict[str, str]], dict[str, list[di
             item: dict[str, Any] = {"op_id": op_id, "kind": kind}
             if kind == KIND_INSERT:
                 new_id = _check_id(raw.get("new_id"), f"{name}#{seq}.new_id")
-                anchor = raw.get("anchor", "FIRST")
-                if anchor == "FIRST":
-                    anchor = None
-                else:
+                # 省略或显式 null => 虚拟首位（None，无歧义）；字面 "FIRST"
+                # 在此保留为普通标识，重放时按本支状态解析（见 replay）。
+                anchor = raw.get("anchor")
+                if anchor is not None:
                     anchor = _check_id(anchor, f"{name}#{seq}.anchor")
                 text = raw.get("text")
                 _require(isinstance(text, str) and text != "",
@@ -213,6 +227,11 @@ def replay(name: str, ops_raw: list[dict[str, Any]], baseline: list[dict[str, st
         st.ops.append(op)
 
         if op.kind == KIND_INSERT:
+            # 解析字面锚点 "FIRST"：本支此时已存在同名步骤（基线 / 墓碑 /
+            # 本支先前插入）则锚定该步骤，否则指虚拟首位。解析结果写回 op，
+            # 使操作记录与合并展示始终反映实际定位。
+            if op.anchor == "FIRST" and op.anchor not in st.by_id:
+                op.anchor = None
             if op.new_id in st.by_id:
                 holder = st.by_id[op.new_id]
                 partner = holder.insert_op
@@ -477,7 +496,8 @@ def merge(payload: Any) -> dict[str, Any]:
                 continue
 
             if op.kind == KIND_INSERT:
-                anchor_label = op.anchor if op.anchor is not None else "FIRST"
+                anchor_kind = "head" if op.anchor is None else "step"
+                anchor_label = _anchor_label(op.anchor)
                 before = own_index[op.new_id]
                 after = merged_index[op.new_id]
                 peers = concurrent_anchor.get(op.anchor, [])
@@ -506,7 +526,9 @@ def merge(payload: Any) -> dict[str, Any]:
                     result = R_KEPT
                 outcomes.append({"branch": name, "seq": op.seq, "op_id": op.op_id,
                                  "kind": op.kind, "result": result,
-                                 "new_id": op.new_id, "anchor": anchor_label,
+                                 "new_id": op.new_id,
+                                 "anchor": op.anchor if op.anchor is not None else "FIRST",
+                                 "anchor_kind": anchor_kind,
                                  "position_before": before, "position_after": after,
                                  "basis": basis})
             elif op.kind == KIND_DELETE:

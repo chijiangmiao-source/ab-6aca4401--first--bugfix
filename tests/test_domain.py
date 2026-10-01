@@ -265,6 +265,90 @@ class TestRejections(unittest.TestCase):
         self.assertEqual(r["conflict"]["issue_count"], 2)
 
 
+class TestFirstIdVsHeadPosition(unittest.TestCase):
+    """字面锚点 FIRST 的二义性：同名普通步骤 vs 虚拟首位，必须可区分。"""
+
+    def test_step_named_FIRST_is_ordinary_anchor_target(self):
+        # 复核员报告场景：left 在 A 后插入标识为 FIRST 的步骤，再把 X 锚定到它
+        r = domain.merge(mk(["A"],
+                            left=[ins("L1", "FIRST", "A"), ins("L2", "X", "FIRST")]))
+        self.assertTrue(r["ok"], r)
+        self.assertEqual(live_ids(r), ["A", "FIRST", "X"])
+        om = outcome_map(r)
+        self.assertEqual(om[("left", "L2")]["anchor_kind"], "step")
+        self.assertEqual(om[("left", "L2")]["result"], domain.R_KEPT)
+        self.assertEqual(om[("left", "L2")]["position_after"], 2)
+
+    def test_head_anchor_coexists_with_FIRST_step(self):
+        # 显式 null 与省略 anchor 恒指首位，与名为 FIRST 的步骤并存不混淆
+        head_null = {"op_id": "L3", "kind": "INSERT", "new_id": "H",
+                     "anchor": None, "text": "显式首位"}
+        head_omitted = {"op_id": "L4", "kind": "INSERT", "new_id": "H2", "text": "省略锚点"}
+        r = domain.merge(mk(["A"],
+                            left=[ins("L1", "FIRST", "A"), ins("L2", "X", "FIRST"),
+                                  head_null, head_omitted]))
+        self.assertTrue(r["ok"], r)
+        self.assertEqual(live_ids(r), ["H2", "H", "A", "FIRST", "X"])
+        om = outcome_map(r)
+        self.assertEqual(om[("left", "L3")]["anchor_kind"], "head")
+        self.assertEqual(om[("left", "L4")]["anchor_kind"], "head")
+        self.assertEqual(om[("left", "L2")]["anchor_kind"], "step")
+        # 两类锚点在记录与展示上可区分
+        self.assertNotEqual(om[("left", "L2")]["anchor_kind"],
+                            om[("left", "L3")]["anchor_kind"])
+
+    def test_FIRST_string_means_head_when_no_such_step(self):
+        # 既有能力回归：本支没有 FIRST 步骤时，字面 "FIRST" 仍指首位
+        r = domain.merge(mk(["A", "B"], left=[ins("L1", "x", "FIRST")]))
+        self.assertTrue(r["ok"], r)
+        self.assertEqual(all_ids(r), ["x", "A", "B"])
+        om = outcome_map(r)
+        self.assertEqual(om[("left", "L1")]["anchor_kind"], "head")
+
+    def test_baseline_step_named_FIRST_is_anchor_target(self):
+        r = domain.merge(mk(["FIRST", "A"], left=[ins("L1", "x", "FIRST")]))
+        self.assertTrue(r["ok"], r)
+        self.assertEqual(all_ids(r), ["FIRST", "x", "A"])
+        om = outcome_map(r)
+        self.assertEqual(om[("left", "L1")]["anchor_kind"], "step")
+
+    def test_anchor_resolves_per_branch_state(self):
+        # right 支没有 FIRST 步骤：其字面 "FIRST" 指首位；left 的同名步骤不受干扰
+        r = domain.merge(mk(["A"],
+                            left=[ins("L1", "FIRST", "A")],
+                            right=[ins("R1", "r", "FIRST")]))
+        self.assertTrue(r["ok"], r)
+        self.assertEqual(all_ids(r), ["r", "A", "FIRST"])
+        om = outcome_map(r)
+        self.assertEqual(om[("right", "R1")]["anchor_kind"], "head")
+
+    def test_tombstoned_FIRST_step_remains_anchor(self):
+        r = domain.merge(mk(["A"],
+                            left=[ins("L1", "FIRST", "A"), dele("L2", "FIRST"),
+                                  ins("L3", "X", "FIRST")]))
+        self.assertTrue(r["ok"], r)
+        self.assertEqual(all_ids(r), ["A", "FIRST", "X"])
+        self.assertEqual(live_ids(r), ["A", "X"])
+        om = outcome_map(r)
+        self.assertEqual(om[("left", "L3")]["anchor_kind"], "step")
+
+    def test_FIRST_step_supports_delete_and_replace(self):
+        # 名为 FIRST 的步骤是普通步骤：删除置墓碑、替换改文本，语义不回归
+        r = domain.merge(mk(["A"],
+                            left=[ins("L1", "FIRST", "A"), rep("L2", "FIRST", "新文本")],
+                            right=[dele("R1", "A")]))
+        self.assertTrue(r["ok"], r)
+        row = next(row for row in r["merged"] if row["id"] == "FIRST")
+        self.assertEqual(row["text"], "新文本")
+        a = next(row for row in r["merged"] if row["id"] == "A")
+        self.assertEqual(a["status"], "tombstone")
+
+    def test_new_id_FIRST_collides_with_baseline_FIRST(self):
+        r = domain.merge(mk(["FIRST"], left=[ins("L1", "FIRST", "A")]))
+        self.assertFalse(r["ok"])
+        self.assertEqual(r["conflict"]["code"], "DUPLICATE_NEW_ID")
+
+
 class TestStructuralValidation(unittest.TestCase):
     def test_reject_81_ops(self):
         ops = [dele(f"L{i:02d}", "A") for i in range(81)]  # 大量重复删除也只 81 条输入

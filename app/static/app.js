@@ -200,8 +200,11 @@ const RESULT_LABEL = { kept: "保留", transformed: "转换", merged: "合并" }
 function renderOutcomes(res) {
   const tbody = $("outcome-table").querySelector("tbody");
   tbody.innerHTML = res.outcomes.map((o) => {
+    // 首位（FIRST）与名为 FIRST 的普通步骤必须在展示上可区分
+    const anchorLabel = o.anchor_kind === "head" ? `${o.anchor}（首位）`
+      : o.anchor === "FIRST" ? `${o.anchor}（同名步骤）` : o.anchor;
     const detail = o.target ? `目标 <code>${esc(o.target)}</code>`
-      : `新标识 <code>${esc(o.new_id)}</code> @ ${esc(o.anchor)}`;
+      : `新标识 <code>${esc(o.new_id)}</code> @ ${esc(anchorLabel)}`;
     const shift = o.kind === "INSERT"
       ? `<br><span class="basis-line">序列位 ${o.position_before} → ${o.position_after}</span>` : "";
     const merged = o.merged_into

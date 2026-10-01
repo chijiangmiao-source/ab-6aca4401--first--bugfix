@@ -23,9 +23,11 @@
       </div>
     </div>
     <p class="hint">
-      操作形态：<code>INSERT</code> 需 <code>new_id</code>、<code>anchor</code>（"FIRST" 或步骤标识）、<code>text</code>；
+      操作形态：<code>INSERT</code> 需 <code>new_id</code>、<code>anchor</code>、<code>text</code>；
       <code>DELETE</code> 需 <code>target</code>；<code>REPLACE</code> 需 <code>target</code> 与 <code>text</code>。
       标识为非空白 ASCII；插入新标识须全局唯一。
+      <code>anchor</code> 省略或 <code>null</code> 恒指首位；字面 <code>"FIRST"</code>
+      在本支已存在同名步骤时指该步骤，否则指首位——首位与名为 FIRST 的步骤始终可区分。
     </p>
     <textarea id="input" spellcheck="false" autocomplete="off"
       aria-label="基线步骤与两支操作 JSON"></textarea>

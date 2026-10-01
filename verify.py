@@ -3,8 +3,9 @@
 依次执行：
   1. 领域测试（unittest，覆盖同锚点并发插入、墓碑后插入、冲突拒绝等）
   2. 构建检查（py_compile 全量语法编译）
-  3. HTTP 冒烟：健康响应、页面可达、三组关键场景的 API 裁定
-     （同锚点并发插入 / 墓碑后插入 / 冲突拒绝）
+  3. HTTP 冒烟：健康响应、页面可达、关键场景的 API 裁定
+     （同锚点并发插入 / 墓碑后插入 / 冲突拒绝 /
+     名为 FIRST 的普通步骤与首位锚定并存）
 
 全部通过以退出码 0 报告验收成功；任一失败退出码非 0。
 """
@@ -210,6 +211,55 @@ def main() -> int:
     check("场景C3 悬空锚点引用被拒绝",
           status == 200 and res.get("ok") is False
           and res["conflict"]["code"] == "DANGLING_ANCHOR")
+
+    # 场景 D：名为 FIRST 的普通步骤标识（复核员报告场景）
+    # left 在 A 后插入标识为 FIRST 的步骤，再把 X 锚定到该步骤；right 无操作
+    first_step = {
+        "baseline": [{"id": "A", "text": "绕机检查"}],
+        "branches": [
+            {"name": "left", "ops": [
+                {"op_id": "L1", "kind": "INSERT", "new_id": "FIRST", "anchor": "A", "text": "名为 FIRST 的普通步骤"},
+                {"op_id": "L2", "kind": "INSERT", "new_id": "X", "anchor": "FIRST", "text": "锚定同名步骤 FIRST"}
+            ]},
+            {"name": "right", "ops": []}
+        ]
+    }
+    status, res = http("POST", "/api/merge", first_step)
+    if status == 200 and isinstance(res, dict) and res.get("ok"):
+        ids = [r["id"] for r in res["merged"]]
+        om = {(o["branch"], o["op_id"]): o for o in res["outcomes"]}
+        check("场景D X 锚定同名步骤 FIRST：合并成功且顺序为 A,FIRST,X",
+              ids == ["A", "FIRST", "X"], f"合并序={ids} 期望=['A', 'FIRST', 'X']")
+        check("场景D X 的锚点记录为同名步骤（anchor_kind=step）",
+              om[("left", "L2")].get("anchor_kind") == "step",
+              f"anchor_kind={om[('left', 'L2')].get('anchor_kind')}")
+    else:
+        check("场景D 名为 FIRST 的普通步骤合并通过", False, f"status={status} body={res}")
+
+    # 场景 E：首位锚定与 FIRST 步骤并存，两者可区分
+    coexist = {
+        "baseline": [{"id": "A", "text": "绕机检查"}],
+        "branches": [
+            {"name": "left", "ops": [
+                {"op_id": "L1", "kind": "INSERT", "new_id": "FIRST", "anchor": "A", "text": "名为 FIRST 的普通步骤"},
+                {"op_id": "L2", "kind": "INSERT", "new_id": "X", "anchor": "FIRST", "text": "锚定同名步骤 FIRST"},
+                {"op_id": "L3", "kind": "INSERT", "new_id": "H-HEAD", "anchor": None, "text": "显式首位锚定"}
+            ]},
+            {"name": "right", "ops": []}
+        ]
+    }
+    status, res = http("POST", "/api/merge", coexist)
+    if status == 200 and isinstance(res, dict) and res.get("ok"):
+        ids = [r["id"] for r in res["merged"]]
+        om = {(o["branch"], o["op_id"]): o for o in res["outcomes"]}
+        check("场景E 首位插入居首、FIRST 步骤保持普通位置",
+              ids == ["H-HEAD", "A", "FIRST", "X"], f"合并序={ids}")
+        check("场景E 首位与同名步骤在操作记录中可区分",
+              om[("left", "L3")].get("anchor_kind") == "head"
+              and om[("left", "L2")].get("anchor_kind") == "step",
+              f"L3={om[('left', 'L3')].get('anchor_kind')} L2={om[('left', 'L2')].get('anchor_kind')}")
+    else:
+        check("场景E 首位锚定与 FIRST 步骤并存合并通过", False, f"status={status} body={res}")
 
     # ---- 汇总 --------------------------------------------------------------
     hr("验收汇总")
