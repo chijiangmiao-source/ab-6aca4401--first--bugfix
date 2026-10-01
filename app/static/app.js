@@ -74,6 +74,30 @@ const SAMPLES = {
         ]
       }
     ]
+  },
+  firstId: {
+    // 首位锚点 "FIRST" 与标识恰为 FIRST 的普通步骤并存：
+    // 裸 "FIRST" 指序列首位；{"id": "FIRST"} 锚定名为 FIRST 的步骤。
+    baseline: [
+      { id: "FIRST", text: "平飞构型确认（标识恰为 FIRST 的普通步骤）" },
+      { id: "A", text: "记录巡航参数" }
+    ],
+    branches: [
+      {
+        name: "left",
+        ops: [
+          { op_id: "L1", kind: "INSERT", new_id: "h-WX", anchor: "FIRST", text: "序列首位：气象雷达终扫" },
+          { op_id: "L2", kind: "INSERT", new_id: "F-STEP", anchor: "A", text: "A 后新增：燃油平衡复核" },
+          { op_id: "L3", kind: "INSERT", new_id: "F-NEXT", anchor: { id: "FIRST" }, text: '锚定名为 FIRST 的步骤（{"id": "FIRST"}），非首位' }
+        ]
+      },
+      {
+        name: "right",
+        ops: [
+          { op_id: "R1", kind: "INSERT", new_id: "r-AFTER-F", anchor: { id: "FIRST" }, text: "紧随 FIRST 步骤：应答机编码复核" }
+        ]
+      }
+    ]
   }
 };
 
@@ -197,11 +221,27 @@ function renderMerged(res) {
 
 const RESULT_LABEL = { kept: "保留", transformed: "转换", merged: "合并" };
 
+function anchorDetail(o) {
+  // 服务端对两种锚点分别给出 wire 形式（anchor）、种类（anchor_kind）与可读说明
+  if (o.anchor_kind === "head") {
+    return `锚点 <code>${esc(JSON.stringify(o.anchor))}</code>（序列首位）`;
+  }
+  if (o.anchor_kind === "step") {
+    const id = typeof o.anchor === "object" ? o.anchor.id : o.anchor;
+    const note = id === "FIRST"
+      ? '名为 <code>FIRST</code> 的普通步骤（<code>{"id":"FIRST"}</code>，非首位锚点）'
+      : `步骤 <code>${esc(id)}</code>`;
+    return `锚点 ${note}`;
+  }
+  // 兼容旧响应：退化为直接展示
+  return `锚点 <code>${esc(JSON.stringify(o.anchor))}</code>`;
+}
+
 function renderOutcomes(res) {
   const tbody = $("outcome-table").querySelector("tbody");
   tbody.innerHTML = res.outcomes.map((o) => {
     const detail = o.target ? `目标 <code>${esc(o.target)}</code>`
-      : `新标识 <code>${esc(o.new_id)}</code> @ ${esc(o.anchor)}`;
+      : `新标识 <code>${esc(o.new_id)}</code>；${anchorDetail(o)}`;
     const shift = o.kind === "INSERT"
       ? `<br><span class="basis-line">序列位 ${o.position_before} → ${o.position_after}</span>` : "";
     const merged = o.merged_into

@@ -5,8 +5,12 @@
   永不回收的序列位置；删除只置墓碑标记（``deleted=True``），节点本身保留，
   因此以"已删步骤"为锚点的后续插入仍有确定位置（紧随墓碑之后），不会发生
   位置漂移。
-- 插入位置完全由锚点标识决定（FIRST 或任一尚存 / 已删 / 本支先前插入的
-  步骤），不由下标决定。
+- 插入位置完全由锚点标识决定（首位锚点 FIRST，或任一尚存 / 已删 / 本支先前
+  插入的步骤），不由下标决定。
+- 首位锚点与名为 FIRST 的普通步骤标识必须可区分、不可混淆：输入/输出边界上，
+  字符串 "FIRST"（或省略 anchor）专指序列首位；标识恰为 "FIRST" 的步骤以
+  ``{"id": "FIRST"}`` 锚定。领域内部以 None 表示首位、字符串表示步骤标识，
+  并由含控制字符的虚拟键 HEAD 占位，二者天然不会撞键。
 - 双支并发插入同一锚点时，按 (分支名, 操作标识) 稳定裁定：分支名字典序
   较小的一支整体贴近锚点，分支内部则严格保持本支顺序重放结果（后发生的
   同锚点插入更贴近锚点）。
@@ -22,6 +26,9 @@ from typing import Any, Optional
 ID_RE = re.compile(r"^[!-\x7e]+$")
 MAX_OPS_PER_BRANCH = 80
 HEAD = "\x00__FIRST__\x00"  # 首位虚拟锚点：含控制字符，不可能与任何合法 ASCII 标识撞键
+# "FIRST" 同时是合法的普通步骤标识；首位锚点只在输入/输出边界用裸字符串
+# "FIRST" 表达，锚定名为 FIRST 的步骤必须用 {"id": "FIRST"}。
+LITERAL_FIRST = "FIRST"
 
 KIND_INSERT = "INSERT"
 KIND_DELETE = "DELETE"
@@ -56,6 +63,16 @@ class Op:
     def loc(self) -> tuple[str, int]:
         return (self.branch, self.seq)
 
+    @staticmethod
+    def anchor_to_wire(anchor: Optional[str]) -> Any:
+        """内部锚点 -> 对外 JSON：None（首位）为裸字符串 "FIRST"；
+        名为 FIRST 的普通步骤为 {"id": "FIRST"}；其余为标识字符串。"""
+        if anchor is None:
+            return LITERAL_FIRST
+        if anchor == LITERAL_FIRST:
+            return {"id": LITERAL_FIRST}
+        return anchor
+
     def as_json(self) -> dict[str, Any]:
         d: dict[str, Any] = {
             "branch": self.branch,
@@ -67,7 +84,7 @@ class Op:
             d["target"] = self.target
         if self.kind == KIND_INSERT:
             d["new_id"] = self.new_id
-            d["anchor"] = self.anchor if self.anchor is not None else "FIRST"
+            d["anchor"] = self.anchor_to_wire(self.anchor)
         if self.text is not None:
             d["text"] = self.text
         return d
@@ -175,11 +192,28 @@ def parse_request(payload: Any) -> tuple[list[dict[str, str]], dict[str, list[di
             item: dict[str, Any] = {"op_id": op_id, "kind": kind}
             if kind == KIND_INSERT:
                 new_id = _check_id(raw.get("new_id"), f"{name}#{seq}.new_id")
-                anchor = raw.get("anchor", "FIRST")
-                if anchor == "FIRST":
-                    anchor = None
+                if "anchor" in raw:
+                    raw_anchor = raw["anchor"]
                 else:
-                    anchor = _check_id(anchor, f"{name}#{seq}.anchor")
+                    raw_anchor = LITERAL_FIRST
+                # 裸字符串 "FIRST"（及省略 anchor）= 序列首位；{"id": "FIRST"}
+                # 才是锚定标识恰为 FIRST 的普通步骤，两种写法不得混淆。
+                if isinstance(raw_anchor, str):
+                    if raw_anchor == LITERAL_FIRST:
+                        anchor: Optional[str] = None
+                    else:
+                        anchor = _check_id(raw_anchor, f"{name}#{seq}.anchor")
+                elif isinstance(raw_anchor, dict) and set(raw_anchor) == {"id"}:
+                    anchor = _check_id(raw_anchor.get("id"), f"{name}#{seq}.anchor")
+                    _require(anchor == LITERAL_FIRST,
+                             f"{name}#{seq}({op_id}) anchor 对象形式仅用于锚定标识为 "
+                             f"{LITERAL_FIRST} 的普通步骤：须为 {{\"id\": \"{LITERAL_FIRST}\"}}；"
+                             f"锚定其他步骤请直接使用其标识字符串")
+                else:
+                    raise OTReject(
+                        f"{name}#{seq}({op_id}) anchor 必须是标识字符串，或首位锚点 "
+                        f"\"{LITERAL_FIRST}\"，或 {{\"id\": \"{LITERAL_FIRST}\"}} "
+                        f"（锚定名为 {LITERAL_FIRST} 的步骤）")
                 text = raw.get("text")
                 _require(isinstance(text, str) and text != "",
                          f"{name}#{seq}({op_id}) text 必须是非空字符串")
@@ -477,7 +511,13 @@ def merge(payload: Any) -> dict[str, Any]:
                 continue
 
             if op.kind == KIND_INSERT:
-                anchor_label = op.anchor if op.anchor is not None else "FIRST"
+                if op.anchor is None:
+                    anchor_label = "序列首位（首位锚点 FIRST）"
+                elif op.anchor == LITERAL_FIRST:
+                    anchor_label = ('名为 FIRST 的普通步骤（锚点 {"id": "FIRST"}，'
+                                    '非序列首位锚点）')
+                else:
+                    anchor_label = op.anchor
                 before = own_index[op.new_id]
                 after = merged_index[op.new_id]
                 peers = concurrent_anchor.get(op.anchor, [])
@@ -487,26 +527,30 @@ def merge(payload: Any) -> dict[str, Any]:
                 if peers:
                     basis = (
                         f"与 {','.join(e.branch + ' 支 ' + e.op.op_id for e in peers)} "
-                        f"并发锚定同一锚点 {anchor_label}；按 (分支名, 操作标识) 稳定裁定，"
+                        f"并发锚定同一锚点（{anchor_label}）；按 (分支名, 操作标识) 稳定裁定，"
                         f"分支序 {names[0]} < {names[1]}，字典序小者整体贴近锚点、分支内保持"
                         f"顺序重放结果；本插入标识与锚点不变，序列位置 {before} → {after}"
                         f"{'（发生位移，故转换）' if moved else '（恰为贴近锚点一方，位置保留）'}。")
                     result = R_TRANSFORMED if moved else R_KEPT
                 elif moved:
-                    basis = (f"锚点 {anchor_label} 无同锚点并发，但对支在更早序列位置的插入"
+                    basis = (f"锚点（{anchor_label}）无同锚点并发，但对支在更早序列位置的插入"
                              f"使本插入整体后移：序列位置 {before} → {after}，标识与锚点不变，"
                              f"属于并发插入导致的位置转换。")
                     result = R_TRANSFORMED
                 elif anchor_node is not None and anchor_node.deleted:
-                    basis = (f"锚点 {anchor_label} 已是墓碑（被 {anchor_node.first_del.op_id} 删除）；"
+                    basis = (f"锚点（{anchor_label}）已是墓碑（被 {anchor_node.first_del.op_id} 删除）；"
                              f"墓碑保留序列位置，本插入紧随其后，位置 {after} 保留，不发生漂移。")
                     result = R_KEPT
                 else:
-                    basis = f"锚点 {anchor_label} 与新标识 {op.new_id} 均稳定，无并发位移，位置 {after} 保留。"
+                    basis = (f"锚点（{anchor_label}）与新标识 {op.new_id} 均稳定，"
+                             f"无并发位移，位置 {after} 保留。")
                     result = R_KEPT
                 outcomes.append({"branch": name, "seq": op.seq, "op_id": op.op_id,
                                  "kind": op.kind, "result": result,
-                                 "new_id": op.new_id, "anchor": anchor_label,
+                                 "new_id": op.new_id,
+                                 "anchor": Op.anchor_to_wire(op.anchor),
+                                 "anchor_kind": "head" if op.anchor is None else "step",
+                                 "anchor_label": anchor_label,
                                  "position_before": before, "position_after": after,
                                  "basis": basis})
             elif op.kind == KIND_DELETE:

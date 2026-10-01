@@ -17,9 +17,18 @@ def mk(baseline, left=(), right=(), lname="left", rname="right"):
 
 
 def ins(op_id, new_id, anchor, text=None):
-    d = {"op_id": op_id, "kind": "INSERT", "new_id": new_id,
-         "anchor": anchor or "FIRST", "text": text or f"文本{new_id}"}
+    # anchor 为 None 时省略（默认首位）；字符串走裸锚点（"FIRST" 即首位）；
+    # dict（如 {"id": "FIRST"}）原样透传，用于锚定名为 FIRST 的普通步骤。
+    if anchor is None:
+        d = {"op_id": op_id, "kind": "INSERT", "new_id": new_id,
+             "text": text or f"文本{new_id}"}
+    else:
+        d = {"op_id": op_id, "kind": "INSERT", "new_id": new_id,
+             "anchor": anchor, "text": text or f"文本{new_id}"}
     return d
+
+
+FIRST_STEP = {"id": "FIRST"}  # 锚定标识恰为 FIRST 的普通步骤（区别于首位锚点）
 
 
 def dele(op_id, target):
@@ -125,6 +134,131 @@ class TestConcurrentInsertArbitration(unittest.TestCase):
         self.assertEqual(om[("left", "L1")]["result"], domain.R_TRANSFORMED)
         self.assertEqual(om[("left", "L1")]["position_before"], 3)
         self.assertEqual(om[("left", "L1")]["position_after"], 4)
+
+
+class TestFirstIdDisambiguation(unittest.TestCase):
+    """首位锚点 FIRST 与名为 FIRST 的普通步骤标识必须可区分、不混淆。"""
+
+    def test_reported_two_step_path_insert_first_step_then_anchor_it(self):
+        # 验收路径：仅含 A 的基线；left 先在 A 后插入标识为 FIRST 的步骤，
+        # 再插入 X 并锚定本支先前新增的 FIRST（{"id": "FIRST"}）；right 无操作。
+        r = domain.merge(mk(
+            ["A"],
+            left=[ins("L1", "FIRST", "A"), ins("L2", "X", FIRST_STEP)]))
+        self.assertTrue(r["ok"], r)
+        self.assertEqual(all_ids(r), ["A", "FIRST", "X"])
+        self.assertEqual(live_ids(r), ["A", "FIRST", "X"])
+        om = outcome_map(r)
+        self.assertEqual(om[("left", "L1")]["result"], domain.R_KEPT)
+        self.assertEqual(om[("left", "L2")]["result"], domain.R_KEPT)
+        # 两条操作的锚点必须按各自含义原样呈现
+        self.assertEqual(om[("left", "L1")]["anchor"], "A")
+        self.assertEqual(om[("left", "L1")]["anchor_kind"], "step")
+        self.assertEqual(om[("left", "L2")]["anchor"], {"id": "FIRST"})
+        self.assertEqual(om[("left", "L2")]["anchor_kind"], "step")
+        # 定位依据须明确这是普通步骤而非序列首位
+        self.assertIn("普通步骤", om[("left", "L2")]["basis"])
+        self.assertIn("非序列首位锚点", om[("left", "L2")]["basis"])
+
+    def test_head_anchor_and_named_first_step_coexist_and_distinguish(self):
+        # 基线含标识恰为 FIRST 的普通步骤：left 用裸 "FIRST" 锚点插到序列首位，
+        # right 用 {"id": "FIRST"} 锚到该普通步骤。两类定位互不混淆。
+        r = domain.merge(mk(
+            ["FIRST", "A"],
+            left=[ins("L1", "H", "FIRST")],
+            right=[ins("R1", "Y", FIRST_STEP)]))
+        self.assertTrue(r["ok"], r)
+        # H 在序列最前；Y 紧随名为 FIRST 的步骤之后
+        self.assertEqual(all_ids(r), ["H", "FIRST", "Y", "A"])
+        om = outcome_map(r)
+        self.assertEqual(om[("left", "L1")]["anchor"], "FIRST")
+        self.assertEqual(om[("left", "L1")]["anchor_kind"], "head")
+        self.assertEqual(om[("right", "R1")]["anchor"], {"id": "FIRST"})
+        self.assertEqual(om[("right", "R1")]["anchor_kind"], "step")
+        self.assertIn("首位锚点", om[("left", "L1")]["anchor_label"])
+        self.assertIn("普通步骤", om[("right", "R1")]["anchor_label"])
+
+    def test_inserted_first_step_then_head_anchor_remains_head(self):
+        # 同支先插入名为 FIRST 的步骤，再用裸 "FIRST" 锚点 —— 仍指序列首位，
+        # 不会落到刚插入的 FIRST 步骤上。
+        r = domain.merge(mk(
+            ["A"],
+            left=[ins("L1", "FIRST", "A"), ins("L2", "H", "FIRST")]))
+        self.assertTrue(r["ok"], r)
+        self.assertEqual(all_ids(r), ["H", "A", "FIRST"])
+        om = outcome_map(r)
+        self.assertEqual(om[("left", "L2")]["anchor"], "FIRST")
+        self.assertEqual(om[("left", "L2")]["anchor_kind"], "head")
+
+    def test_concurrent_arbitration_applies_to_named_first_step_anchor(self):
+        # 同锚点（名为 FIRST 的普通步骤）并发插入，(分支名, 操作标识) 裁定照常
+        r = domain.merge(mk(
+            ["FIRST", "A"],
+            left=[ins("L1", "X", FIRST_STEP)],
+            right=[ins("Rp", "p", FIRST_STEP), ins("Rq", "q", FIRST_STEP)]))
+        self.assertTrue(r["ok"], r)
+        # left 贴近 FIRST 步骤；right 内保持重放序（q 更贴近）
+        self.assertEqual(all_ids(r), ["FIRST", "X", "q", "p", "A"])
+        om = outcome_map(r)
+        self.assertEqual(om[("left", "L1")]["result"], domain.R_KEPT)
+        self.assertEqual(om[("right", "Rp")]["result"], domain.R_TRANSFORMED)
+
+    def test_head_concurrent_inserts_separate_from_named_first_step(self):
+        # 锚定首位 与 锚定 FIRST 步骤 是两个不同锚点，不构成"同锚点并发"
+        r = domain.merge(mk(
+            ["FIRST", "A"],
+            left=[ins("L1", "H", "FIRST")],
+            right=[ins("R1", "Y", FIRST_STEP)]))
+        self.assertTrue(r["ok"], r)
+        om = outcome_map(r)
+        # 双方都不应看到彼此作为"同锚点并发"对手
+        self.assertNotIn("并发锚定同一锚点", om[("left", "L1")]["basis"])
+        self.assertNotIn("并发锚定同一锚点", om[("right", "R1")]["basis"])
+
+    def test_op_as_json_distinguishes_two_anchor_kinds(self):
+        # 操作序列化：首位为裸字符串，名为 FIRST 的步骤为对象形式
+        head_op = domain.Op(branch="b", seq=1, op_id="H", kind=domain.KIND_INSERT,
+                            anchor=None, new_id="H")
+        step_op = domain.Op(branch="b", seq=2, op_id="S", kind=domain.KIND_INSERT,
+                            anchor="FIRST", new_id="S")
+        self.assertEqual(head_op.as_json()["anchor"], "FIRST")
+        self.assertEqual(step_op.as_json()["anchor"], {"id": "FIRST"})
+
+
+class TestAnchorStructuralValidation(unittest.TestCase):
+    def _reject(self, payload):
+        with self.assertRaises(domain.OTReject):
+            domain.merge(payload)
+
+    def test_bare_first_string_is_head_not_step(self):
+        # 裸 "FIRST" 永远是首位锚点；基线无 FIRST 步骤时也不悬空
+        r = domain.merge(mk(["A"], left=[ins("L1", "z", "FIRST")]))
+        self.assertTrue(r["ok"])
+        self.assertEqual(all_ids(r), ["z", "A"])
+
+    def test_object_anchor_other_than_first_step_rejected(self):
+        self._reject(mk(["A"], left=[ins("L1", "x", {"id": "A"})]))
+        self._reject(mk(["A"], left=[ins("L1", "x", {"id": "B"})]))
+
+    def test_malformed_anchor_rejected(self):
+        self._reject(mk(["A"], left=[ins("L1", "x", {"id": "FIRST", "extra": 1})]))
+        self._reject(mk(["A"], left=[ins("L1", "x", 123)]))
+        self._reject(mk(["A"], left=[ins("L1", "x", ["FIRST"])]))
+
+    def test_dangling_named_first_step_anchor_when_no_such_step(self):
+        # 基线没有 FIRST 步骤、本支也未先前插入时，{"id": "FIRST"} 是悬空锚点
+        r = domain.merge(mk(["A"], left=[ins("L1", "x", FIRST_STEP)]))
+        self.assertFalse(r["ok"])
+        self.assertEqual(r["conflict"]["code"], "DANGLING_ANCHOR")
+        self.assertEqual(r["conflict"]["ref"], "FIRST")
+
+    def test_dangling_named_first_step_on_other_branch_insert(self):
+        # FIRST 步骤由 left 插入时，right 不能锚定它（对侧标识不可引用）
+        r = domain.merge(mk(["A"],
+                            left=[ins("L1", "FIRST", "A")],
+                            right=[ins("R1", "Y", FIRST_STEP)]))
+        self.assertFalse(r["ok"])
+        self.assertEqual(r["conflict"]["code"], "DANGLING_ANCHOR")
 
 
 class TestTombstoneAnchor(unittest.TestCase):

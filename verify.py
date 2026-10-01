@@ -3,8 +3,9 @@
 依次执行：
   1. 领域测试（unittest，覆盖同锚点并发插入、墓碑后插入、冲突拒绝等）
   2. 构建检查（py_compile 全量语法编译）
-  3. HTTP 冒烟：健康响应、页面可达、三组关键场景的 API 裁定
-     （同锚点并发插入 / 墓碑后插入 / 冲突拒绝）
+  3. HTTP 冒烟：健康响应、页面可达、关键场景的 API 裁定
+     （同锚点并发插入 / 墓碑后插入 / 冲突拒绝 /
+     首位锚点与普通 FIRST 标识的区分与并存）
 
 全部通过以退出码 0 报告验收成功；任一失败退出码非 0。
 """
@@ -210,6 +211,79 @@ def main() -> int:
     check("场景C3 悬空锚点引用被拒绝",
           status == 200 and res.get("ok") is False
           and res["conflict"]["code"] == "DANGLING_ANCHOR")
+
+    # 场景 D：首位锚点 "FIRST" 与名为 FIRST 的普通步骤标识必须可区分
+    # left 先在 A 后插入标识为 FIRST 的步骤，再把 X 锚定本支先前新增的 FIRST
+    # （{"id": "FIRST"} 是普通步骤锚点，不是序列首位）；right 无操作。
+    first_id = {
+        "baseline": [{"id": "A", "text": "基线步骤A"}],
+        "branches": [
+            {"name": "left", "ops": [
+                {"op_id": "L1", "kind": "INSERT", "new_id": "FIRST", "anchor": "A", "text": "标识恰为 FIRST 的新增步骤"},
+                {"op_id": "L2", "kind": "INSERT", "new_id": "X", "anchor": {"id": "FIRST"}, "text": "锚定 FIRST 步骤（非首位）"}
+            ]},
+            {"name": "right", "ops": []}
+        ]
+    }
+    status, res = http("POST", "/api/merge", first_id)
+    if status == 200 and res.get("ok"):
+        ids = [r["id"] for r in res["merged"]]
+        check("场景D 普通 FIRST 标识不被当成首位：合并序为 A,FIRST,X",
+              ids == ["A", "FIRST", "X"], f"合并序={ids}")
+        om = {(o["branch"], o["op_id"]): o for o in res["outcomes"]}
+        l2 = om[("left", "L2")]
+        check("场景D 操作记录区分两类锚点（对象形式 + step 种类 + 可读依据）",
+              l2["anchor"] == {"id": "FIRST"} and l2["anchor_kind"] == "step"
+              and "普通步骤" in l2["basis"] and "非序列首位锚点" in l2["basis"],
+              f"anchor={l2.get('anchor')} kind={l2.get('anchor_kind')}")
+        l1 = om[("left", "L1")]
+        check("场景D 首条插入锚点 A 原样保留",
+              l1["anchor"] == "A" and l1["anchor_kind"] == "step")
+    else:
+        check("场景D 普通 FIRST 标识合并通过", False, f"status={status} body={body}")
+
+    # 场景 D2：首位锚定与普通 FIRST 步骤并存（基线含标识 FIRST 的步骤）
+    coexist = {
+        "baseline": [{"id": "FIRST", "text": "名为 FIRST 的基线步骤"}, {"id": "A", "text": "基线步骤A"}],
+        "branches": [
+            {"name": "left", "ops": [
+                {"op_id": "L1", "kind": "INSERT", "new_id": "H", "anchor": "FIRST", "text": "裸 FIRST：插到序列首位"}
+            ]},
+            {"name": "right", "ops": [
+                {"op_id": "R1", "kind": "INSERT", "new_id": "Y", "anchor": {"id": "FIRST"}, "text": "对象 FIRST：紧随该普通步骤"}
+            ]}
+        ]
+    }
+    status, res = http("POST", "/api/merge", coexist)
+    if status == 200 and res.get("ok"):
+        ids = [r["id"] for r in res["merged"]]
+        check("场景D2 首位锚点与 FIRST 步骤并存且定位不同：H,FIRST,Y,A",
+              ids == ["H", "FIRST", "Y", "A"], f"合并序={ids}")
+        om = {(o["branch"], o["op_id"]): o for o in res["outcomes"]}
+        check("场景D2 两类锚点在操作记录中可区分",
+              om[("left", "L1")]["anchor"] == "FIRST"
+              and om[("left", "L1")]["anchor_kind"] == "head"
+              and om[("right", "R1")]["anchor"] == {"id": "FIRST"}
+              and om[("right", "R1")]["anchor_kind"] == "step")
+    else:
+        check("场景D2 并存场景合并通过", False, f"status={status} body={body}")
+
+    # 场景 D3：无 FIRST 步骤时 {"id": "FIRST"} 为悬空锚点，裸 "FIRST" 仍是首位
+    dangling_first_step = {
+        "baseline": [{"id": "A", "text": "x"}],
+        "branches": [
+            {"name": "left", "ops": [
+                {"op_id": "L1", "kind": "INSERT", "new_id": "x1", "anchor": {"id": "FIRST"}, "text": "悬"}
+            ]},
+            {"name": "right", "ops": []}
+        ]
+    }
+    status, res = http("POST", "/api/merge", dangling_first_step)
+    check("场景D3 无此步骤时对象锚点报悬空（不误当首位）",
+          status == 200 and res.get("ok") is False
+          and res["conflict"]["code"] == "DANGLING_ANCHOR"
+          and res["conflict"]["ref"] == "FIRST",
+          f"body={res}")
 
     # ---- 汇总 --------------------------------------------------------------
     hr("验收汇总")
