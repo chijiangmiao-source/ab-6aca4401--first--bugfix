@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>飞行试验检查单 · 双支离线修订复核</title>
+<link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+<header>
+  <h1>飞行试验检查单 · 双支离线修订 OT 复核</h1>
+  <p class="sub">墓碑保留序列模型 · 同锚点并发插入按 (分支名, 操作标识) 稳定裁定 · 每支至多 80 条顺序操作</p>
+</header>
+
+<main>
+  <section class="panel">
+    <div class="panel-head">
+      <h2>录入区</h2>
+      <div class="samples">
+        <button type="button" data-sample="concurrent">场景1：同锚点并发 + 墓碑后插入</button>
+        <button type="button" data-sample="merge">场景2：幂等合并</button>
+        <button type="button" data-sample="conflict">场景3：冲突拒绝</button>
+      </div>
+    </div>
+    <p class="hint">
+      操作形态：<code>INSERT</code> 需 <code>new_id</code>、<code>anchor</code>（"FIRST" 或步骤标识）、<code>text</code>；
+      <code>DELETE</code> 需 <code>target</code>；<code>REPLACE</code> 需 <code>target</code> 与 <code>text</code>。
+      标识为非空白 ASCII；插入新标识须全局唯一。
+    </p>
+    <textarea id="input" spellcheck="false" autocomplete="off"
+      aria-label="基线步骤与两支操作 JSON"></textarea>
+    <div class="actions">
+      <button type="button" id="verify-btn">执行双支变换复核</button>
+      <span id="input-state" class="input-state">结论已随输入作废，需重新复核</span>
+    </div>
+  </section>
+
+  <div id="error-box" class="panel error hidden" role="alert"></div>
+  <div id="conflict-box" class="panel conflict hidden" role="alert"></div>
+
+  <section id="result-area" class="hidden">
+    <section class="panel">
+      <h2>规范合并步骤表（可执行）</h2>
+      <p id="arbitration" class="basis-line"></p>
+      <div class="table-wrap">
+        <table id="merged-table">
+          <thead>
+            <tr><th>执行序号</th><th>序列位</th><th>标识</th><th>步骤文本</th><th>来源 / 状态</th></tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <p id="stats-line" class="stats"></p>
+    </section>
+
+    <section class="panel">
+      <h2>每条原操作的变换结果</h2>
+      <div class="table-wrap">
+        <table id="outcome-table">
+          <thead>
+            <tr><th>分支</th><th>#</th><th>操作标识</th><th>类型</th><th>结论</th><th>变换依据</th></tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+  </section>
+</main>
+
+<footer>POST /api/merge · GET /healthz · 输入一旦改变，旧结论立即清除</footer>
+<script src="/app.js"></script>
+</body>
+</html>

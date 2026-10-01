@@ -1,0 +1,30 @@
+services:
+  web:
+    build: .
+    image: checklist-ot:latest
+    environment:
+      PORT: "8080"
+      HOST: "0.0.0.0"
+      QUIET: "1"
+    ports:
+      # 可配置宿主端口：HOST_PORT=9090 docker compose up
+      - "${HOST_PORT:-8080}:8080"
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=2).status==200 else 1)"]
+      interval: 3s
+      timeout: 3s
+      retries: 15
+      start_period: 3s
+
+  verify:
+    image: checklist-ot:latest
+    depends_on:
+      web:
+        condition: service_healthy
+    environment:
+      WEB_URL: "http://web:8080"
+    entrypoint: ["python3", "verify.py"]
+    # 覆盖同锚点并发插入、墓碑后插入与冲突拒绝三类场景后，
+    # 运行领域测试 + 构建检查 + 页面/健康 HTTP 冒烟，随后退出，
+    # 退出码即验收结论。
+    restart: "no"
